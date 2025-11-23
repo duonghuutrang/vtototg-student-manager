@@ -2,57 +2,78 @@ import streamlit as st
 import pandas as pd
 import cv2
 import numpy as np
+import av
 from pyzbar.pyzbar import decode
 from datetime import datetime
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Check-in Sân Tập Lái Xe", layout="wide", page_icon="🚗")
+st.set_page_config(page_title="Check-in Lái Xe Pro", layout="wide", page_icon="🚗")
 
-# --- QUẢN LÝ SESSION STATE (LƯU TRỮ TẠM THỜI) ---
-# Khởi tạo dataframe trong session_state nếu chưa có
+# --- QUẢN LÝ SESSION STATE ---
 if "df_hocvien" not in st.session_state:
-    # Tạo dataframe rỗng với các cột chuẩn
     cols = ["cccd", "ho_ten", "ngay_sinh", "sdt", "dia_chi", "ngay_dang_ky", "lich_thi", "trang_thai"]
     st.session_state["df_hocvien"] = pd.DataFrame(columns=cols)
 
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
+if "scanned_code" not in st.session_state:
+    st.session_state["scanned_code"] = None
 
-# --- HÀM TẠO DỮ LIỆU MẪU ---
+# --- XỬ LÝ VIDEO TRỰC TIẾP (CALLBACK) ---
+# Hàm này chạy liên tục trên từng khung hình video
+def video_frame_callback(frame):
+    img = frame.to_ndarray(format="bgr24")
+    
+    # Giải mã QR
+    decoded_objects = decode(img)
+    
+    if decoded_objects:
+        for obj in decoded_objects:
+            qr_content = obj.data.decode("utf-8")
+            # Vẽ hình chữ nhật quanh QR để biết đã nhận
+            points = obj.polygon
+            if len(points) == 4:
+                pts = np.array(points, np.int32)
+                pts = pts.reshape((-1, 1, 2))
+                cv2.polylines(img, [pts], True, (0, 255, 0), 3)
+            
+            # Trả về mã QR tìm thấy (thông qua cơ chế queue hoặc return frame đặc biệt)
+            # Ở đây ta dùng cách đơn giản là vẽ lên hình, logic xử lý data sẽ nằm ở main thread
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# --- CLASS XỬ LÝ QR (Mới) ---
+class QRCodeProcessor(VideoTransformerBase):
+    def __init__(self):
+        self.scanned_data = None
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        decoded_objects = decode(img)
+        
+        if decoded_objects:
+            for obj in decoded_objects:
+                self.scanned_data = obj.data.decode("utf-8")
+                # Vẽ khung xanh khi nhận diện được
+                pts = np.array(obj.polygon, np.int32).reshape((-1, 1, 2))
+                cv2.polylines(img, [pts], True, (0, 255, 0), 3)
+                
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# --- HÀM PHỤ TRỢ (Giữ nguyên từ code cũ) ---
 def create_sample_data():
-    """Hàm tạo dữ liệu giả lập để test"""
     data = {
-        "cccd": ["079090000001", "001090000002", "079123456789"],
-        "ho_ten": ["NGUYỄN VĂN A", "TRẦN THỊ B", "LÊ VĂN C"],
-        "ngay_sinh": ["01/01/1990", "15/05/1995", "20/10/2000"],
-        "sdt": ["0901234567", "0909888777", "0912345678"],
-        "dia_chi": ["Quận 1, TP.HCM", "Hà Đông, Hà Nội", "Thủ Đức, TP.HCM"],
-        "ngay_dang_ky": ["2023-01-01", "2023-06-01", "2024-01-01"],
-        "lich_thi": ["2025-12-31", "2023-12-31", "2025-10-20"], # Coi như hạn tập
-        "trang_thai": ["Hợp lệ", "Hết hạn", "Hợp lệ"] 
+        "cccd": ["079090000001", "001090000002"],
+        "ho_ten": ["NGUYỄN VĂN A", "TRẦN THỊ B"],
+        "ngay_sinh": ["01/01/1990", "15/05/1995"],
+        "sdt": ["0901234567", "0909888777"],
+        "dia_chi": ["Quận 1, TP.HCM", "Hà Đông, Hà Nội"],
+        "ngay_dang_ky": ["2023-01-01", "2023-06-01"],
+        "lich_thi": ["2025-12-31", "2023-12-31"], 
+        "trang_thai": ["Hợp lệ", "Hết hạn"] 
     }
     return pd.DataFrame(data)
 
-# --- HÀM ĐĂNG NHẬP ---
-def login_screen():
-    st.markdown("<h1 style='text-align: center;'>🔐 Đăng Nhập Hệ Thống</h1>", unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        with st.form("login_form"):
-            username = st.text_input("Tên đăng nhập", placeholder="admin")
-            password = st.text_input("Mật khẩu", type="password", placeholder="1234")
-            submitted = st.form_submit_button("Đăng nhập", use_container_width=True)
-            
-            if submitted:
-                if username == "admin" and password == "1234":
-                    st.session_state["logged_in"] = True
-                    st.success("Đăng nhập thành công!")
-                    st.rerun() # Tải lại trang để vào giao diện chính
-                else:
-                    st.error("❌ Sai tên đăng nhập hoặc mật khẩu!")
-
-# --- HÀM XỬ LÝ QR ---
 def parse_vietnam_cccd_qr(qr_data):
     try:
         parts = qr_data.split("|")
@@ -62,92 +83,71 @@ def parse_vietnam_cccd_qr(qr_data):
     except Exception:
         return None
 
-# --- GIAO DIỆN CHÍNH (SAU KHI ĐĂNG NHẬP) ---
+# --- GIAO DIỆN CHÍNH ---
 def main_app():
-    # Sidebar
-    st.sidebar.title(f"Xin chào, Admin 👋")
-    
-    # Nút đăng xuất
-    if st.sidebar.button("Đăng xuất"):
-        st.session_state["logged_in"] = False
-        st.rerun()
-        
-    menu = st.sidebar.radio("Menu chức năng", ["📸 Quét QR Check-in", "📋 Danh Sách Học Viên", "⚙️ Quản Trị Dữ Liệu"])
+    st.sidebar.title("Admin Panel")
+    if st.sidebar.button("Tạo Data Mẫu"):
+        st.session_state["df_hocvien"] = create_sample_data()
+        st.success("Đã tạo data mẫu!")
 
-    # --- 1. CHỨC NĂNG QUÉT QR ---
-    if menu == "📸 Quét QR Check-in":
-        st.title("Kiểm Soát Ra Vào Sân")
-        st.info("Hệ thống kiểm tra dựa trên số CCCD trong mã QR")
+    st.title("📸 Check-in Tự Động (Live)")
+    st.write("Chọn đúng **Camera sau (Back/Environment)** trong phần cài đặt bên dưới.")
 
-        img_file_buffer = st.camera_input("Camera")
+    # Cấu hình WebRTC
+    ctx = webrtc_streamer(
+        key="qr-scanner",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=QRCodeProcessor,  # Sử dụng class xử lý QR
+        media_stream_constraints={
+            "video": {
+                "facingMode": "environment", # Ưu tiên camera sau
+                # "width": {"min": 1280}, # Có thể bật dòng này để ép độ phân giải cao
+            } 
+        },
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        async_processing=True,
+    )
 
-        if img_file_buffer is not None:
-            bytes_data = img_file_buffer.getvalue()
-            cv2_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-            decoded_objects = decode(cv2_img)
-
-            if decoded_objects:
-                for obj in decoded_objects:
-                    qr_content = obj.data.decode("utf-8")
-                    parsed_info = parse_vietnam_cccd_qr(qr_content)
+    # --- XỬ LÝ KẾT QUẢ TỪ STREAM ---
+    if ctx.video_processor:
+        # Kiểm tra xem processor có quét được gì chưa
+        if ctx.video_processor.scanned_data:
+            qr_content = ctx.video_processor.scanned_data
+            
+            # Chỉ xử lý nếu mã mới khác mã cũ (tránh nháy liên tục)
+            if st.session_state["scanned_code"] != qr_content:
+                st.session_state["scanned_code"] = qr_content
+                
+                # --- LOGIC KIỂM TRA HỌC VIÊN ---
+                st.divider()
+                st.markdown(f"### 📡 Đã nhận tín hiệu QR:")
+                
+                parsed_info = parse_vietnam_cccd_qr(qr_content)
+                if parsed_info:
+                    cccd_check = parsed_info['cccd']
+                    st.info(f"Đang kiểm tra: {parsed_info['ho_ten']} - {cccd_check}")
                     
-                    if parsed_info:
-                        cccd_check = parsed_info['cccd']
-                        st.subheader(f"Đã quét: {parsed_info['ho_ten']} ({cccd_check})")
-                        
-                        # Kiểm tra trong database (session_state)
-                        df = st.session_state["df_hocvien"]
+                    df = st.session_state["df_hocvien"]
+                    if not df.empty:
                         student = df[df['cccd'] == cccd_check]
-                        
                         if not student.empty:
                             info = student.iloc[0]
-                            # Logic kiểm tra
                             today = datetime.now().date()
                             lich_thi_date = datetime.strptime(info['lich_thi'], "%Y-%m-%d").date()
                             
                             if info['trang_thai'] == "Hợp lệ" and lich_thi_date >= today:
                                 st.success("✅ HỢP LỆ - MỜI VÀO SÂN")
-                                st.write(f"Hạn tập: {info['lich_thi']}")
+                                st.balloons()
                             else:
-                                st.error("⛔ KHÔNG HỢP LỆ")
-                                st.warning(f"Lý do: Trạng thái {info['trang_thai']} hoặc quá hạn.")
+                                st.error(f"⛔ KHÔNG HỢP LỆ: {info['trang_thai']}")
                         else:
-                            st.warning("⚠️ Học viên chưa đăng ký trong hệ thống!")
+                            st.warning("⚠️ Học viên không có trong danh sách.")
                     else:
-                        st.error("QR không phải CCCD chuẩn.")
-            else:
-                st.caption("Chưa nhận diện được QR code.")
+                        st.warning("Dữ liệu trống. Hãy bấm 'Tạo Data Mẫu' bên trái.")
+                else:
+                    st.error("QR không đúng định dạng CCCD.")
 
-    # --- 2. DANH SÁCH HỌC VIÊN ---
-    elif menu == "📋 Danh Sách Học Viên":
-        st.title("Danh Sách Học Viên")
-        
-        # Hiển thị thống kê nhỏ
-        total = len(st.session_state["df_hocvien"])
-        st.metric("Tổng số học viên", total)
-        
-        st.dataframe(st.session_state["df_hocvien"], use_container_width=True)
+    st.caption("Nếu camera bị đen hoặc không chạy, hãy kiểm tra quyền truy cập Camera trên trình duyệt.")
 
-    # --- 3. QUẢN TRỊ DỮ LIỆU (TẠO DATA MẪU) ---
-    elif menu == "⚙️ Quản Trị Dữ Liệu":
-        st.title("Công Cụ Quản Trị")
-        st.write("Tại đây bạn có thể khởi tạo dữ liệu giả để test ứng dụng.")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.warning("⚠️ Lưu ý: Hành động này sẽ ghi đè danh sách hiện tại.")
-            if st.button("🔄 Khởi tạo Data Mẫu (Test)", type="primary"):
-                st.session_state["df_hocvien"] = create_sample_data()
-                st.success("Đã tạo dữ liệu mẫu thành công! Hãy chuyển sang tab 'Danh Sách' để xem.")
-        
-        with col2:
-             if st.button("🗑️ Xóa toàn bộ dữ liệu"):
-                 st.session_state["df_hocvien"] = st.session_state["df_hocvien"].iloc[0:0] # Xóa hết row
-                 st.success("Đã xóa trắng danh sách.")
-
-# --- ĐIỀU HƯỚNG ---
-if st.session_state["logged_in"]:
+if __name__ == "__main__":
     main_app()
-else:
-    login_screen()
